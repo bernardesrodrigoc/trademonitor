@@ -1,155 +1,183 @@
 import os
-import time
-import re
 import json
+import threading
+import time
+from flask import Flask, request
 import requests
 import yfinance as yf
-from flask import Flask, request
 
-# ----------------------------
-# Leitura e validação das ENVs
-# ----------------------------
-raw_token = os.getenv("BOT_TOKEN")
-raw_chat_id = os.getenv("CHAT_ID")
+# ================================
+# CARREGAR VARIÁVEIS DO RAILWAY
+# ================================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("CHAT_ID")  # ID para enviar os alertas
 
-if not raw_token:
-    raise SystemExit("ERRO: BOT_TOKEN não definido nas variáveis de ambiente.")
+if not BOT_TOKEN or not ADMIN_CHAT_ID:
+    print("❌ ERRO: BOT_TOKEN ou CHAT_ID não configurados no Railway")
+    exit()
 
-if not raw_chat_id:
-    raise SystemExit("ERRO: CHAT_ID não definido nas variáveis de ambiente.")
+ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-token = raw_token.strip()
-chat_id_str = raw_chat_id.strip()
-chat_id_digits = re.sub(r"[^\d\-]", "", chat_id_str)
+# ================================
+# BANCO DE DADOS LOCAL (JSON)
+# ================================
+DATA_FILE = "config.json"
 
-try:
-    chat_id = int(chat_id_digits)
-except:
-    chat_id = chat_id_digits
-
-# ============================
-# CONFIGURAÇÃO NO CÓDIGO
-# ============================
-TICKER = "VALE3.SA"
-TARGET_PRICE = 65.00
-
-STATE_FILE = "state.json"
-
-
-# ============================
-# Funções de estado persistente
-# ============================
-def load_state():
-    try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {"alerta_liberado": True}
+if not os.path.exists(DATA_FILE):
+    config = {
+        "limites": {"VALE3.SA": 65.0},   # Limite padrão
+        "alert_sent": {},
+    }
+    with open(DATA_FILE, "w") as f:
+        json.dump(config, f)
+else:
+    with open(DATA_FILE, "r") as f:
+        config = json.load(f)
 
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+def save_config():
+    with open(DATA_FILE, "w") as f:
+        json.dump(config, f, indent=4)
 
 
-# ============================
-# FUNÇÃO PARA ENVIAR MENSAGEM
-# ============================
-def send_message(text):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except:
-        pass
+# ================================
+# TELEGRAM
+# ================================
+def send_message(chat_id, text):
+    url = f"{BASE_URL}/sendMessage"
+    requests.post(url, json={"chat_id": chat_id, "text": text})
 
 
-# ============================
-# FUNÇÃO PARA CONSULTAR PREÇO
-# ============================
-def get_price():
-    try:
-        data = yf.Ticker(TICKER)
-        hist = data.history(period="1d", interval="5m")
-        if hist.empty:
-            return None
-        return float(hist["Close"].iloc[-1])
-    except:
-        return None
-
-
-# ============================
-# LOOP DE MONITORAMENTO
-# ============================
-def monitor():
-    send_message(f"🚀 Bot iniciado! Monitorando {TICKER} com meta em R$ {TARGET_PRICE:.2f}")
-
+# ================================
+# MONITORAMENTO DAS AÇÕES
+# ================================
+def monitor_loop():
     while True:
-        state = load_state()  
+        for ticker, limite in config["limites"].items():
+            try:
+                acao = yf.Ticker(ticker)
+                price = acao.fast_info.get("last_price", None)
 
-        price = get_price()
-        if price is None:
-            time.sleep(30)
-            continue
+                if price is None:
+                    print(f"Falha ao obter preço de {ticker}")
+                    continue
 
-        print(f"{TICKER} → R$ {price}")
+                print(f"{ticker} → R$ {price}")
 
-        # ENVIA ALERTA SE O ALVO BATER E O ALERTA ESTIVER LIBERADO
-        if price >= TARGET_PRICE and state["alerta_liberado"]:
-            send_message(
-                f"🔥 ALVO ATINGIDO!\n"
-                f"{TICKER} chegou a R$ {price:.2f}\n"
-                f"🎯 Meta: R$ {TARGET_PRICE:.2f}\n\n"
-                f"Se quiser receber o próximo aviso, envie: /continuar"
-            )
+                # Verifica se já enviou alerta
+                alertado = config["alert_sent"].get(ticker, False)
 
-            state["alerta_liberado"] = False
-            save_state(state)
+                # Envia alerta se atingir limite
+                if price >= limite and not alertado:
+                    msg = f"🚨 ALERTA!\n{ticker} atingiu R$ {price:.2f} (limite: R$ {limite})"
+                    send_message(ADMIN_CHAT_ID, msg)
 
-        time.sleep(30)
+                    config["alert_sent"][ticker] = True
+                    save_config()
+
+            except Exception as e:
+                print("Erro monitorando:", e)
+
+        time.sleep(10)  # Verifica a cada 10s
 
 
-# ============================
-# FLASK (WEBHOOK TELEGRAM)
-# ============================
+# ================================
+# WEBHOOK TELEGRAM (para comandos)
+# ================================
 app = Flask(__name__)
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json()
+    print("Recebido via webhook:", update)
+
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
+
+        # ===============================
+        # COMANDOS DO BOT
+        # ===============================
+
+        if text == "/continuar":
+            config["alert_sent"] = {}
+            save_config()
+            send_message(chat_id, "Os alertas foram reativados! 🔔")
+            return "OK"
+
+        if text == "/listar":
+            msg = "📌 Monitorando:\n\n"
+            for t, v in config["limites"].items():
+                msg += f"• {t} → limite R$ {v}\n"
+            send_message(chat_id, msg)
+            return "OK"
+
+        if text.startswith("/configurar"):
+            try:
+                _, ticker, valor = text.split()
+                valor = float(valor)
+                config["limites"][ticker.upper()] = valor
+                config["alert_sent"][ticker.upper()] = False
+                save_config()
+                send_message(chat_id, f"✔ Limite de {ticker.upper()} atualizado para R$ {valor}")
+            except:
+                send_message(chat_id, "Uso: /configurar VALE3.SA 67.5")
+            return "OK"
+
+        if text.startswith("/adicionar"):
+            try:
+                _, ticker, valor = text.split()
+                valor = float(valor)
+                config["limites"][ticker.upper()] = valor
+                config["alert_sent"][ticker.upper()] = False
+                save_config()
+                send_message(chat_id, f"✔ {ticker.upper()} adicionada com limite R$ {valor}")
+            except:
+                send_message(chat_id, "Uso: /adicionar PETR4.SA 40")
+            return "OK"
+
+        if text.startswith("/remover"):
+            try:
+                _, ticker = text.split()
+                ticker = ticker.upper()
+
+                if ticker in config["limites"]:
+                    del config["limites"][ticker]
+                if ticker in config["alert_sent"]:
+                    del config["alert_sent"][ticker]
+
+                save_config()
+                send_message(chat_id, f"❌ {ticker} removida do monitoramento.")
+            except:
+                send_message(chat_id, "Uso: /remover VALE3.SA")
+            return "OK"
+
+        send_message(chat_id, "Comandos disponíveis:\n"
+                              "/listar\n"
+                              "/configurar TICKER VALOR\n"
+                              "/adicionar TICKER VALOR\n"
+                              "/remover TICKER\n"
+                              "/continuar")
+
+    return "OK"
+
 
 @app.route("/")
 def home():
-    return f"Bot monitorando {TICKER}..."
-
-@app.route(f"/{token}", methods=["POST"])
-def telegram_webhook():
-    data = request.json
-
-    if not data or "message" not in data:
-        return "ok"
-
-    message = data["message"]
-    text = message.get("text", "").strip()
-
-    # Se o usuário enviar /continuar
-    if text == "/continuar":
-        state = load_state()
-        state["alerta_liberado"] = True
-        save_state(state)
-
-        send_message("🔔 Novo alerta ativado! Enviarei aviso novamente quando o limite for atingido.")
-    
-    return "ok"
+    return "TradeMonitor Online"
 
 
-# ============================
+# ================================
+# INICIAR MONITORAMENTO
+# ================================
+t = threading.Thread(target=monitor_loop)
+t.daemon = True
+t.start()
+
+
+# ================================
 # MAIN
-# ============================
+# ================================
 if __name__ == "__main__":
-
-    # Inicia o monitoramento em thread separada
-    import threading
-    t = threading.Thread(target=monitor)
-    t.daemon = True
-    t.start()
-
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8080)
