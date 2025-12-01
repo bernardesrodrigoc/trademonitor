@@ -9,8 +9,12 @@ from flask import Flask
 # ============================
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-TICKER = os.getenv("TICKER")           # ex: "VALE3.SA"
-TARGET_PRICE = float(os.getenv("TARGET_PRICE"))  # ex: 65.00
+
+# ============================
+# CONFIGURAÇÃO DIRETO NO CÓDIGO
+# ============================
+TICKER = "VALE3.SA"   # coloque aqui a ação
+TARGET_PRICE = 65.00  # coloque aqui o preço-alvo
 
 # ============================
 # FUNÇÃO PARA ENVIAR MENSAGEM
@@ -29,17 +33,18 @@ def send_message(text):
 def get_price():
     try:
         data = yf.Ticker(TICKER)
+        hist = data.history(period="1m")
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
     except Exception:
         return None
-
-    price = data.history(period="1m")["Close"].iloc[-1]
-    return float(price)
 
 # ============================
 # LOOP DE MONITORAMENTO
 # ============================
 def monitor():
-    send_message(f"🚀 Bot iniciado! Monitorando {TICKER} com alvo em R$ {TARGET_PRICE:.2f}")
+    send_message(f"🚀 Bot iniciado! Monitorando {TICKER} com meta em R$ {TARGET_PRICE:.2f}")
 
     already_alerted = False
 
@@ -47,13 +52,13 @@ def monitor():
         price = get_price()
 
         if price is None:
-            print("Erro ao obter preço... tentando novamente.")
+            print("Não foi possível obter o preço...")
             time.sleep(30)
             continue
 
-        print(f"Preço atual de {TICKER}: {price}")
+        print(f"{TICKER} → R$ {price}")
 
-        # Condição de alerta
+        # Condição do alerta
         if price >= TARGET_PRICE and not already_alerted:
             send_message(
                 f"🔥 ALVO ATINGIDO!\n"
@@ -62,19 +67,19 @@ def monitor():
             )
             already_alerted = True
 
-        time.sleep(60)  # checa 1x por minuto
+        time.sleep(60)  # verifica a cada 1 minuto
 
 # ============================
-# FLASK PARA MANTER O RAILWAY RODANDO
+# FLASK PARA MANTER O RAILWAY VIVO
 # ============================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot SwingTrade rodando no Railway!"
+    return f"Bot monitorando {TICKER}..."
 
 # ============================
-# START
+# INICIAR SERVIDOR E MONITOR
 # ============================
 if __name__ == "__main__":
     import threading
