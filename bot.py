@@ -33,12 +33,16 @@ def send_message(text):
 def get_price():
     try:
         data = yf.Ticker(TICKER)
-        hist = data.history(period="1m")
+        hist = data.history(period="1d", interval="1m")
+
         if hist.empty:
             return None
+
         return float(hist["Close"].iloc[-1])
+
     except Exception:
         return None
+
 
 # ============================
 # LOOP DE MONITORAMENTO
