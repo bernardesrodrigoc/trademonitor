@@ -6,6 +6,8 @@ from flask import Flask, request
 import requests
 import yfinance as yf
 
+from datetime import datetime, timezone, timedelta
+
 # ================================
 # CARREGAR VARIÁVEIS DO RAILWAY
 # ================================
@@ -81,32 +83,58 @@ def monitor_loop():
     send_message(ADMIN_CHAT_ID, "🚀 TradeMonitor iniciado e monitorando ações.")
 
     while True:
-        for ticker, limite in config["limites"].items():
+        # 1. Define o fuso horário do Brasil (UTC-3)
+        # Isso é essencial pois o servidor do Railway usa hora UTC
+        fuso_brasil = timezone(timedelta(hours=-3))
+        agora = datetime.now(fuso_brasil)
+        
+        # 2. Verifica se é dia de semana (0=Segunda, 4=Sexta) e horário (10h as 17h)
+        # agora.hour < 17 significa que roda até 16:59:59
+        dentro_do_horario = 10 <= agora.hour < 17
+        eh_dia_util = agora.weekday() < 5 
 
-            price = get_price(ticker)
+        if dentro_do_horario and eh_dia_util:
+            print(f"⏰ Horário comercial ({agora.strftime('%H:%M')}). Verificando ações...")
+            
+            for ticker, limite in config["limites"].items():
+                price = get_price(ticker)
 
-            if price is None:
-                print(f"Falha ao obter preço de {ticker}")
-                continue
+                if price is None:
+                    print(f"Falha ao obter preço de {ticker}")
+                    continue
 
-            print(f"{ticker} → R$ {price:.2f}")
+                print(f"{ticker} → R$ {price:.2f}")
 
-            alertado = config["alert_sent"].get(ticker, False)
+                alertado = config["alert_sent"].get(ticker, False)
 
-            # Alerta se passar o limite
-            if price >= limite and not alertado:
-                msg = (
-                    f"🚨 ALERTA!\n"
-                    f"{ticker} atingiu R$ {price:.2f}\n"
-                    f"🎯 Limite configurado: R$ {limite:.2f}"
-                )
-                send_message(ADMIN_CHAT_ID, msg)
+                # Alerta se passar o limite
+                if price >= limite and not alertado:
+                    msg = (
+                        f"🚨 ALERTA!\n"
+                        f"{ticker} atingiu R$ {price:.2f}\n"
+                        f"🎯 Limite configurado: R$ {limite:.2f}"
+                    )
+                    send_message(ADMIN_CHAT_ID, msg)
 
-                config["alert_sent"][ticker] = True
-                save_config()
+                    config["alert_sent"][ticker] = True
+                    save_config()
 
-        time.sleep(600)  # ajustável
+            # Se está no horário, espera o tempo padrão (ex: 600s = 10 min)
+            # Sugestão: Se quiser mais agilidade, diminua para 60s ou 300s
+            time.sleep(600) 
 
+        else:
+            # 3. Se estiver fora do horário, apenas aguarda
+            print(f"💤 Fora do horário ou fim de semana: {agora.strftime('%H:%M')} - Aguardando...")
+            
+            # Limpa os alertas enviados no dia anterior para que alertem novamente no dia seguinte
+            if agora.hour >= 17 and any(config["alert_sent"].values()):
+                 print("🧹 Resetando alertas para o próximo dia...")
+                 config["alert_sent"] = {} 
+                 save_config()
+
+            # Dorme por 5 minutos (300s) antes de checar a hora novamente para economizar recurso
+            time.sleep(300)
 
 # ================================
 # FLASK – WEBHOOK TELEGRAM
@@ -216,4 +244,5 @@ t.start()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
 
