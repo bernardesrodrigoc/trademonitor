@@ -105,7 +105,7 @@ def monitor_loop():
                 config["alert_sent"][ticker] = True
                 save_config()
 
-        time.sleep(15)  # ajustável
+        time.sleep(600)  # ajustável
 
 
 # ================================
@@ -216,3 +216,4 @@ t.start()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
