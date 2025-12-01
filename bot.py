@@ -1,9 +1,10 @@
 import os
 import time
 import re
+import json
 import requests
 import yfinance as yf
-from flask import Flask
+from flask import Flask, request
 
 # ----------------------------
 # Leitura e validação das ENVs
@@ -11,33 +12,19 @@ from flask import Flask
 raw_token = os.getenv("BOT_TOKEN")
 raw_chat_id = os.getenv("CHAT_ID")
 
-print("RAW BOT_TOKEN repr:", repr(raw_token))
-print("RAW CHAT_ID repr:   ", repr(raw_chat_id))
-
 if not raw_token:
     raise SystemExit("ERRO: BOT_TOKEN não definido nas variáveis de ambiente.")
 
 if not raw_chat_id:
     raise SystemExit("ERRO: CHAT_ID não definido nas variáveis de ambiente.")
 
-# Limpa espaços/quebras e caracteres invisíveis
 token = raw_token.strip()
 chat_id_str = raw_chat_id.strip()
-
-# Remove qualquer caractere que não seja dígito ou sinal de negativo (só por segurança)
 chat_id_digits = re.sub(r"[^\d\-]", "", chat_id_str)
 
-print("CLEANED CHAT_ID (digits-only):", repr(chat_id_digits))
-
-# Validar
-if chat_id_digits == "":
-    raise SystemExit("ERRO: CHAT_ID inválido depois da limpeza. Verifique a variável no Railway.")
-
-# Converter para int quando possível (Telegram aceita tanto string quanto número)
 try:
     chat_id = int(chat_id_digits)
-except Exception:
-    # se não conseguir converter, mantenha como string limpa
+except:
     chat_id = chat_id_digits
 
 # ============================
@@ -46,24 +33,37 @@ except Exception:
 TICKER = "VALE3.SA"
 TARGET_PRICE = 65.00
 
+STATE_FILE = "state.json"
+
+
+# ============================
+# Funções de estado persistente
+# ============================
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"alerta_liberado": True}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
 # ============================
 # FUNÇÃO PARA ENVIAR MENSAGEM
 # ============================
 def send_message(text):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    payload = {"chat_id": chat_id, "text": text}
 
-    print("➡️ Enviando payload:", payload)
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        print("⬅️ Resposta Telegram:", r.status_code, r.text)
-        return r
-    except requests.RequestException as e:
-        print("ERRO ao chamar Telegram API:", e)
-        return None
+        requests.post(url, json=payload, timeout=10)
+    except:
+        pass
+
 
 # ============================
 # FUNÇÃO PARA CONSULTAR PREÇO
@@ -73,47 +73,45 @@ def get_price():
         data = yf.Ticker(TICKER)
         hist = data.history(period="1d", interval="5m")
         if hist.empty:
-            print("Hist vazio retornado pelo yfinance.")
             return None
         return float(hist["Close"].iloc[-1])
-    except Exception as e:
-        print("Erro no yfinance:", e)
+    except:
         return None
+
 
 # ============================
 # LOOP DE MONITORAMENTO
 # ============================
 def monitor():
-    print("Iniciando monitoramento...")
     send_message(f"🚀 Bot iniciado! Monitorando {TICKER} com meta em R$ {TARGET_PRICE:.2f}")
 
-    already_alerted = False
-
     while True:
+        state = load_state()  
+
         price = get_price()
         if price is None:
-            print("Preço None — aguardando e tentando novamente.")
             time.sleep(30)
             continue
 
         print(f"{TICKER} → R$ {price}")
 
-        if price >= TARGET_PRICE and not already_alerted:
-            print("⚠️ ATINGIU O ALVO — ENVIANDO ALERTA")
-            resp = send_message(
+        # ENVIA ALERTA SE O ALVO BATER E O ALERTA ESTIVER LIBERADO
+        if price >= TARGET_PRICE and state["alerta_liberado"]:
+            send_message(
                 f"🔥 ALVO ATINGIDO!\n"
                 f"{TICKER} chegou a R$ {price:.2f}\n"
-                f"🎯 Meta: R$ {TARGET_PRICE:.2f}"
+                f"🎯 Meta: R$ {TARGET_PRICE:.2f}\n\n"
+                f"Se quiser receber o próximo aviso, envie: /continuar"
             )
-            # Log extra se a API respondeu com erro
-            if resp is not None and resp.status_code != 200:
-                print("AVISO: Telegram retornou status != 200. Verifique TOKEN / CHAT_ID.")
-            already_alerted = True
+
+            state["alerta_liberado"] = False
+            save_state(state)
 
         time.sleep(30)
 
+
 # ============================
-# FLASK para manter Railway ativo
+# FLASK (WEBHOOK TELEGRAM)
 # ============================
 app = Flask(__name__)
 
@@ -121,7 +119,33 @@ app = Flask(__name__)
 def home():
     return f"Bot monitorando {TICKER}..."
 
+@app.route(f"/{token}", methods=["POST"])
+def telegram_webhook():
+    data = request.json
+
+    if not data or "message" not in data:
+        return "ok"
+
+    message = data["message"]
+    text = message.get("text", "").strip()
+
+    # Se o usuário enviar /continuar
+    if text == "/continuar":
+        state = load_state()
+        state["alerta_liberado"] = True
+        save_state(state)
+
+        send_message("🔔 Novo alerta ativado! Enviarei aviso novamente quando o limite for atingido.")
+    
+    return "ok"
+
+
+# ============================
+# MAIN
+# ============================
 if __name__ == "__main__":
+
+    # Inicia o monitoramento em thread separada
     import threading
     t = threading.Thread(target=monitor)
     t.daemon = True
