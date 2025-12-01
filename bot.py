@@ -10,22 +10,30 @@ from flask import Flask
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+print("BOT_TOKEN =", TOKEN)
+print("CHAT_ID   =", CHAT_ID)
+
 # ============================
 # CONFIGURAÇÃO DIRETO NO CÓDIGO
 # ============================
-TICKER = "VALE3.SA"   # coloque aqui a ação
-TARGET_PRICE = 65.00  # coloque aqui o preço-alvo
+TICKER = "VALE3.SA"
+TARGET_PRICE = 65.00
 
 # ============================
 # FUNÇÃO PARA ENVIAR MENSAGEM
 # ============================
 def send_message(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
     payload = {
         "chat_id": CHAT_ID,
         "text": text
     }
-    requests.post(url, json=payload)
+
+    print("➡️ Enviando para Telegram:", payload)
+
+    r = requests.post(url, json=payload)
+    print("⬅️ Resposta Telegram:", r.status_code, r.text)
 
 # ============================
 # FUNÇÃO PARA CONSULTAR PREÇO
@@ -33,16 +41,17 @@ def send_message(text):
 def get_price():
     try:
         data = yf.Ticker(TICKER)
-        hist = data.history(period="1d", interval="1m")
+        hist = data.history(period="1d", interval="5m")
 
         if hist.empty:
+            print("Histórico vazio!")
             return None
 
         return float(hist["Close"].iloc[-1])
 
-    except Exception:
+    except Exception as e:
+        print("Erro no yfinance:", e)
         return None
-
 
 # ============================
 # LOOP DE MONITORAMENTO
@@ -50,28 +59,25 @@ def get_price():
 def monitor():
     send_message(f"🚀 Bot iniciado! Monitorando {TICKER} com meta em R$ {TARGET_PRICE:.2f}")
 
-    already_alerted = False
-
     while True:
         price = get_price()
 
         if price is None:
-            print("Não foi possível obter o preço...")
-            time.sleep(30)
+            print("Preço None, tentando novamente...")
+            time.sleep(20)
             continue
 
         print(f"{TICKER} → R$ {price}")
 
-        # Condição do alerta
-        if price >= TARGET_PRICE and not already_alerted:
+        if price >= TARGET_PRICE:
+            print("⚠️ ATINGIU O ALVO — ENVIANDO ALERTA!")
             send_message(
                 f"🔥 ALVO ATINGIDO!\n"
                 f"{TICKER} chegou a R$ {price:.2f}\n"
-                f"🎯 Meta configurada: R$ {TARGET_PRICE:.2f}"
+                f"🎯 Meta: R$ {TARGET_PRICE:.2f}"
             )
-            already_alerted = True
 
-        time.sleep(60)  # verifica a cada 1 minuto
+        time.sleep(30)
 
 # ============================
 # FLASK PARA MANTER O RAILWAY VIVO
@@ -82,9 +88,6 @@ app = Flask(__name__)
 def home():
     return f"Bot monitorando {TICKER}..."
 
-# ============================
-# INICIAR SERVIDOR E MONITOR
-# ============================
 if __name__ == "__main__":
     import threading
 
