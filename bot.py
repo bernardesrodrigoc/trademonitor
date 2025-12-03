@@ -2,30 +2,29 @@ import os
 import json
 import threading
 import time
-from flask import Flask, request
 import requests
 import yfinance as yf
-
-from datetime import datetime, timezone, timedelta
+from flask import Flask, request
+from datetime import datetime, timedelta, timezone
 
 # ================================
-# CARREGAR VARIÁVEIS DO RAILWAY
+# CONFIGURAÇÕES INICIAIS
 # ================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("CHAT_ID")  # ID para enviar os alertas
+ADMIN_CHAT_ID = os.getenv("CHAT_ID")
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
-    print("❌ ERRO: BOT_TOKEN ou CHAT_ID não configurados no Railway")
+    print("❌ ERRO: BOT_TOKEN ou CHAT_ID não configurados.")
+    # Para testes locais, você pode comentar o exit(), mas no Railway é essencial
     exit()
 
 ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-# ================================
-# BANCO DE DADOS LOCAL (JSON)
-# ================================
 DATA_FILE = "config.json"
 
+# ================================
+# PERSISTÊNCIA DE DADOS (JSON)
+# ================================
 if not os.path.exists(DATA_FILE):
     config = {
         "limites": {"VALE3.SA": 65.0},
@@ -37,212 +36,190 @@ else:
     with open(DATA_FILE, "r") as f:
         config = json.load(f)
 
-
 def save_config():
     with open(DATA_FILE, "w") as f:
         json.dump(config, f, indent=4)
 
-
 # ================================
-# TELEGRAM – envia mensagens
+# FUNÇÕES DE UTILIDADE (TELEGRAM & BOLSA)
 # ================================
 def send_message(chat_id, text):
     try:
         url = f"{BASE_URL}/sendMessage"
-        r = requests.post(url, json={"chat_id": chat_id, "text": text})
-        print("Telegram resposta:", r.status_code, r.text)
+        requests.post(url, json={"chat_id": chat_id, "text": text})
     except Exception as e:
-        print("Erro ao enviar mensagem:", e)
+        print(f"Erro Telegram: {e}")
 
-
-# ================================
-# MONITORAMENTO DAS AÇÕES
-# ================================
 def get_price(ticker):
-    """Obtém o último preço de forma estável."""
     try:
+        # Tenta pegar dados rápidos de 1 dia
         acao = yf.Ticker(ticker)
-
-        # Coleta 1 dia, candles de 1 minuto
         hist = acao.history(period="1d", interval="1m")
-
+        
         if hist.empty:
-            print(f"⚠ Hist vazio para {ticker}")
             return None
-
-        price = float(hist["Close"].iloc[-1])
-        return price
-
+        return float(hist["Close"].iloc[-1])
     except Exception as e:
-        print(f"❌ Erro ao obter preço de {ticker}:", e)
+        print(f"Erro yfinance ({ticker}): {e}")
         return None
 
+# ================================
+# LÓGICA DE TEMPO E SONO
+# ================================
+def obter_segundos_ate_proxima_abertura(agora):
+    """
+    Calcula quantos segundos faltam até as 10:00 do próximo dia útil.
+    """
+    # Cria um objeto datetime para as 10:00 do dia atual
+    target = agora.replace(hour=10, minute=0, second=0, microsecond=0)
 
+    # Se já passou das 10:00 de hoje, o alvo inicial é amanhã
+    if agora >= target:
+        target += timedelta(days=1)
+
+    # Se o alvo cair em Sábado (5) ou Domingo (6), avança para Segunda
+    while target.weekday() > 4:
+        target += timedelta(days=1)
+
+    diferenca = (target - agora).total_seconds()
+    return max(0, diferenca) # Garante que não retorne negativo
+
+# ================================
+# LOOP DE MONITORAMENTO OTIMIZADO
+# ================================
 def monitor_loop():
-    print("🔄 Monitoramento iniciado…")
-    send_message(ADMIN_CHAT_ID, "🚀 TradeMonitor iniciado e monitorando ações.")
+    print("🔄 Monitoramento iniciado em background...")
+    send_message(ADMIN_CHAT_ID, "🚀 TradeMonitor online e otimizado.")
 
     while True:
-        # 1. Define o fuso horário do Brasil (UTC-3)
-        # Isso é essencial pois o servidor do Railway usa hora UTC
+        # Forçar Fuso Horário Brasil (UTC-3)
         fuso_brasil = timezone(timedelta(hours=-3))
         agora = datetime.now(fuso_brasil)
-        
-        # 2. Verifica se é dia de semana (0=Segunda, 4=Sexta) e horário (10h as 17h)
-        # agora.hour < 17 significa que roda até 16:59:59
-        dentro_do_horario = 10 <= agora.hour < 17
-        eh_dia_util = agora.weekday() < 5 
 
-        if dentro_do_horario and eh_dia_util:
-            print(f"⏰ Horário comercial ({agora.strftime('%H:%M')}). Verificando ações...")
+        # Regras de horário
+        eh_dia_util = agora.weekday() < 5  # 0=Seg, 4=Sex
+        mercado_aberto = 10 <= agora.hour < 17
+
+        # --- CENÁRIO 1: MERCADO ABERTO ---
+        if eh_dia_util and mercado_aberto:
+            print(f"⚡ [{agora.strftime('%H:%M')}] Verificando preços...")
             
             for ticker, limite in config["limites"].items():
                 price = get_price(ticker)
-
+                
                 if price is None:
-                    print(f"Falha ao obter preço de {ticker}")
                     continue
+                
+                print(f"   • {ticker}: R$ {price:.2f} (Alvo: {limite})")
 
-                print(f"{ticker} → R$ {price:.2f}")
+                ja_alertou = config["alert_sent"].get(ticker, False)
 
-                alertado = config["alert_sent"].get(ticker, False)
-
-                # Alerta se passar o limite
-                if price >= limite and not alertado:
-                    msg = (
-                        f"🚨 ALERTA!\n"
-                        f"{ticker} atingiu R$ {price:.2f}\n"
-                        f"🎯 Limite configurado: R$ {limite:.2f}"
-                    )
+                if price >= limite and not ja_alertou:
+                    msg = f"🚨 ALERTA DE PREÇO!\n\n📈 {ticker} atingiu R$ {price:.2f}\n🎯 Alvo: R$ {limite:.2f}"
                     send_message(ADMIN_CHAT_ID, msg)
-
+                    
                     config["alert_sent"][ticker] = True
                     save_config()
 
-            # Se está no horário, espera o tempo padrão (ex: 600s = 10 min)
-            # Sugestão: Se quiser mais agilidade, diminua para 60s ou 300s
-            time.sleep(600) 
+            # Espera 10 minutos (600s) dentro do pregão
+            time.sleep(600)
 
+        # --- CENÁRIO 2: MERCADO FECHADO (ECONOMIA MÁXIMA) ---
         else:
-            # 3. Se estiver fora do horário, apenas aguarda
-            print(f"💤 Fora do horário ou fim de semana: {agora.strftime('%H:%M')} - Aguardando...")
-            
-            # Limpa os alertas enviados no dia anterior para que alertem novamente no dia seguinte
-            if agora.hour >= 17 and any(config["alert_sent"].values()):
-                 print("🧹 Resetando alertas para o próximo dia...")
-                 config["alert_sent"] = {} 
-                 save_config()
+            print(f"💤 [{agora.strftime('%H:%M')}] Fora do horário de pregão.")
 
-            # Dorme por 5 minutos (300s) antes de checar a hora novamente para economizar recurso
-            time.sleep(300)
+            # 1. Resetar alertas para o dia seguinte (se já passou das 17h)
+            # Verifica se há algum alerta marcado como True para limpar
+            if any(config["alert_sent"].values()):
+                print("🧹 Resetando status de alertas para amanhã...")
+                config["alert_sent"] = {}
+                save_config()
+
+            # 2. Calcular sono profundo
+            segundos_para_dormir = obter_segundos_ate_proxima_abertura(agora)
+            horas_para_dormir = seconds_para_dormir / 3600
+
+            msg_sleep = f"🌙 Bot entrando em modo de espera por {horas_para_dormir:.1f} horas (até 10:00)."
+            print(msg_sleep)
+            
+            # Opcional: Avisar no Telegram que o bot vai dormir (pode comentar se achar chato)
+            # send_message(ADMIN_CHAT_ID, msg_sleep)
+
+            # A thread para AQUI e só acorda na hora exata
+            time.sleep(segundos_para_dormir)
 
 # ================================
-# FLASK – WEBHOOK TELEGRAM
+# SERVIDOR WEB (FLASK)
 # ================================
 app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
-    print("📩 Webhook recebido:", update)
-
-    if not update or "message" not in update:
-        return "OK"
+    if not update or "message" not in update: return "OK"
 
     chat_id = update["message"]["chat"]["id"]
-    text = update["message"].get("text", "")
-
-    # ======================
-    # COMANDOS DO BOT
-    # ======================
-
+    text = update["message"].get("text", "").strip()
+    
+    # Comandos
     if text == "/listar":
-        msg = "📌 Ações monitoradas:\n\n"
+        msg = "📌 *Ações Monitoradas:*\n"
+        if not config["limites"]: msg += "Nenhuma ação cadastrada."
         for t, v in config["limites"].items():
-            msg += f"• {t} → limite R$ {v}\n"
+            status = "✅" if config["alert_sent"].get(t) else "👀"
+            msg += f"{status} {t}: R$ {v}\n"
         send_message(chat_id, msg)
-        return "OK"
 
-    if text.startswith("/configurar"):
+    elif text.startswith("/configurar") or text.startswith("/adicionar"):
         try:
             _, ticker, valor = text.split()
-            valor = float(valor)
             ticker = ticker.upper()
-
-            config["limites"][ticker] = valor
-            config["alert_sent"][ticker] = False
+            config["limites"][ticker] = float(valor)
+            config["alert_sent"][ticker] = False # Reseta alerta ao editar
             save_config()
-
-            send_message(chat_id, f"✔ Limite de {ticker} atualizado para R$ {valor}")
+            send_message(chat_id, f"💾 {ticker} definido para R$ {valor}")
         except:
-            send_message(chat_id, "Uso correto:\n/configurar VALE3.SA 67.5")
-        return "OK"
+            send_message(chat_id, "⚠️ Uso correto: /configurar PETR4.SA 35.50")
 
-    if text.startswith("/adicionar"):
-        try:
-            _, ticker, valor = text.split()
-            valor = float(valor)
-            ticker = ticker.upper()
-
-            config["limites"][ticker] = valor
-            config["alert_sent"][ticker] = False
-            save_config()
-
-            send_message(chat_id, f"✔ {ticker} adicionada com limite R$ {valor}")
-        except:
-            send_message(chat_id, "Uso:\n/adicionar PETR4.SA 40")
-        return "OK"
-
-    if text.startswith("/remover"):
+    elif text.startswith("/remover"):
         try:
             _, ticker = text.split()
             ticker = ticker.upper()
-
-            config["limites"].pop(ticker, None)
-            config["alert_sent"].pop(ticker, None)
-            save_config()
-
-            send_message(chat_id, f"❌ {ticker} removida do monitoramento")
+            if ticker in config["limites"]:
+                del config["limites"][ticker]
+                if ticker in config["alert_sent"]: del config["alert_sent"][ticker]
+                save_config()
+                send_message(chat_id, f"🗑 {ticker} removido.")
+            else:
+                send_message(chat_id, "⚠️ Ação não encontrada.")
         except:
-            send_message(chat_id, "Uso:\n/remover VALE3.SA")
-        return "OK"
+            send_message(chat_id, "⚠️ Uso correto: /remover PETR4.SA")
+            
+    elif text == "/status":
+        # Comando extra pra ver se o bot está vivo
+        fuso = timezone(timedelta(hours=-3))
+        agora = datetime.now(fuso).strftime("%d/%m %H:%M")
+        send_message(chat_id, f"🤖 Bot Online.\nHorário Servidor: {agora}")
 
-    if text == "/continuar":
-        config["alert_sent"] = {}
-        save_config()
-        send_message(chat_id, "🔔 Alertas reativados.")
-        return "OK"
-
-    send_message(
-        chat_id,
-        "Comandos disponíveis:\n"
-        "/listar\n"
-        "/configurar TICKER VALOR\n"
-        "/adicionar TICKER VALOR\n"
-        "/remover TICKER\n"
-        "/continuar"
-    )
+    else:
+        # Se não for comando conhecido, mostra ajuda
+        if text.startswith("/"):
+            send_message(chat_id, "Comandos:\n/listar\n/configurar TICKER VALOR\n/remover TICKER\n/status")
 
     return "OK"
 
-
 @app.route("/")
 def home():
-    return "TradeMonitor Online"
-
+    return "TradeMonitor Running"
 
 # ================================
-# INICIAR MONITORAMENTO EM THREAD
+# INICIALIZAÇÃO
 # ================================
+# Inicia a thread de monitoramento separada do Flask
 t = threading.Thread(target=monitor_loop)
 t.daemon = True
 t.start()
 
-# ================================
-# MAIN
-# ================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
-
