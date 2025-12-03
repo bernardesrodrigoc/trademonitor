@@ -15,10 +15,12 @@ ADMIN_CHAT_ID = os.getenv("CHAT_ID")
 
 if not BOT_TOKEN or not ADMIN_CHAT_ID:
     print("❌ ERRO: BOT_TOKEN ou CHAT_ID não configurados.")
-    # Para testes locais, você pode comentar o exit(), mas no Railway é essencial
-    exit()
+    # Se estiver rodando localmente sem variáveis de ambiente, comente a linha abaixo
+    # exit() 
 
-ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+if ADMIN_CHAT_ID:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DATA_FILE = "config.json"
 
@@ -44,6 +46,7 @@ def save_config():
 # FUNÇÕES DE UTILIDADE (TELEGRAM & BOLSA)
 # ================================
 def send_message(chat_id, text):
+    if not chat_id: return
     try:
         url = f"{BASE_URL}/sendMessage"
         requests.post(url, json={"chat_id": chat_id, "text": text})
@@ -89,7 +92,8 @@ def obter_segundos_ate_proxima_abertura(agora):
 # ================================
 def monitor_loop():
     print("🔄 Monitoramento iniciado em background...")
-    send_message(ADMIN_CHAT_ID, "🚀 TradeMonitor online e otimizado.")
+    if ADMIN_CHAT_ID:
+        send_message(ADMIN_CHAT_ID, "🚀 TradeMonitor online e otimizado.")
 
     while True:
         # Forçar Fuso Horário Brasil (UTC-3)
@@ -129,7 +133,6 @@ def monitor_loop():
             print(f"💤 [{agora.strftime('%H:%M')}] Fora do horário de pregão.")
 
             # 1. Resetar alertas para o dia seguinte (se já passou das 17h)
-            # Verifica se há algum alerta marcado como True para limpar
             if any(config["alert_sent"].values()):
                 print("🧹 Resetando status de alertas para amanhã...")
                 config["alert_sent"] = {}
@@ -137,14 +140,13 @@ def monitor_loop():
 
             # 2. Calcular sono profundo
             segundos_para_dormir = obter_segundos_ate_proxima_abertura(agora)
-            horas_para_dormir = seconds_para_dormir / 3600
+            
+            # --- CORREÇÃO AQUI ---
+            horas_para_dormir = segundos_para_dormir / 3600  # Variável corrigida
 
             msg_sleep = f"🌙 Bot entrando em modo de espera por {horas_para_dormir:.1f} horas (até 10:00)."
             print(msg_sleep)
             
-            # Opcional: Avisar no Telegram que o bot vai dormir (pode comentar se achar chato)
-            # send_message(ADMIN_CHAT_ID, msg_sleep)
-
             # A thread para AQUI e só acorda na hora exata
             time.sleep(segundos_para_dormir)
 
@@ -196,13 +198,11 @@ def webhook():
             send_message(chat_id, "⚠️ Uso correto: /remover PETR4.SA")
             
     elif text == "/status":
-        # Comando extra pra ver se o bot está vivo
         fuso = timezone(timedelta(hours=-3))
         agora = datetime.now(fuso).strftime("%d/%m %H:%M")
         send_message(chat_id, f"🤖 Bot Online.\nHorário Servidor: {agora}")
 
     else:
-        # Se não for comando conhecido, mostra ajuda
         if text.startswith("/"):
             send_message(chat_id, "Comandos:\n/listar\n/configurar TICKER VALOR\n/remover TICKER\n/status")
 
@@ -215,7 +215,6 @@ def home():
 # ================================
 # INICIALIZAÇÃO
 # ================================
-# Inicia a thread de monitoramento separada do Flask
 t = threading.Thread(target=monitor_loop)
 t.daemon = True
 t.start()
